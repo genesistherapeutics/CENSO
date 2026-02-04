@@ -164,16 +164,24 @@ class GenericProc:
         :param jobdir: Path to the jobdir.
         :return: Tuple of (returncode of the external program or -1 in case of exception, stderr output).
         """
+        jobdir = Path(jobdir)
+        stderr_path = jobdir / "stderr.log"
+
         try:
-            # call external program and write output into outputfile
-            with open(outputpath, "w", newline=None) as outputfile:
+            # Redirect stderr to file instead of pipe to avoid deadlock.
+            # Using stderr=subprocess.PIPE with poll() loop can deadlock if
+            # the subprocess writes >64KB to stderr before exiting, as the
+            # pipe buffer fills and blocks the subprocess on write().
+            with open(outputpath, "w", newline=None) as outputfile, \
+                 open(stderr_path, "w") as stderr_file:
+
                 logger.debug(f"{f'worker{os.getpid()}:':{WARNLEN}}Running {call}...")
 
                 # create subprocess for external program
                 sub = subprocess.Popen(
                     call,
                     shell=False,
-                    stderr=subprocess.PIPE,
+                    stderr=stderr_file,
                     cwd=jobdir,
                     stdout=outputfile,
                     env=env or ENVIRON,
@@ -194,14 +202,16 @@ class GenericProc:
                             break
                     time.sleep(0.1)
 
-                # wait for process to finish
-                _, stderr = sub.communicate()
-                errors = stderr.decode(errors="replace")
+                sub.wait()
                 returncode = sub.returncode
-                if returncode != 0:
-                    logger.info(
-                        f"{f'worker{os.getpid()}:':{WARNLEN}} Returncode: {returncode} Errors:\n{errors}"
-                    )
+
+            # Read stderr from file after process completes
+            errors = stderr_path.read_text(errors="replace") if stderr_path.exists() else ""
+
+            if returncode != 0:
+                logger.info(
+                    f"{f'worker{os.getpid()}:':{WARNLEN}} Returncode: {returncode} Errors:\n{errors}"
+                )
 
             logger.debug(f"{f'worker{os.getpid()}:':{WARNLEN}}Done.")
 
